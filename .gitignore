@@ -1,0 +1,26 @@
+__pycache__/
+*.pyc
+.DS_Store
+out/
+website/
+docs-minimind/
+
+# Local training artifacts and model weights.
+checkpoints/
+logs/
+wandb/
+runs/
+*.log
+*.pid
+*.pth
+*.pt
+*.ckpt
+*.safetensors
+
+# Large local datasets. Keep only lightweight dataset helpers in git.
+dataset/*
+!dataset/
+!dataset/__init__.py
+!dataset/dataset.md
+!dataset/lm_dataset.py
+!dataset/download_jsonl.py
