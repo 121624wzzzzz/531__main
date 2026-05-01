@@ -1,0 +1,553 @@
+% S1--S10 模型变体定义。
+% 若使用下方表格中的 \toprule、\midrule 和 \bottomrule，请在主文件导言区加入：
+% \usepackage{booktabs}
+
+\subsection{S1--S10 模型变体定义}
+
+为系统研究 tied embedding/unembedding 矩阵的结构化松绑方式及其对语言模型训练的影响，
+本文在相同的 Transformer 主干上构造十种 embedding-head 变体，记为 S1--S10。
+所有变体共享相同的模型主干、优化器、训练数据与训练超参数，仅在输入 embedding
+与输出 projection 的有效参数化方式上不同。
+
+设词表大小为 $V$，隐藏维度为 $d$。令共享的 tied embedding/unembedding 矩阵为
+\begin{equation}
+    W \in \mathbb{R}^{V \times d}.
+\end{equation}
+对于输入 token $x_t \in \{1,\dots,V\}$，其在共享矩阵中的 lookup 向量为
+\begin{equation}
+    W[x_t] \in \mathbb{R}^{d}.
+\end{equation}
+设 Transformer 最后一层输出 hidden state 为
+\begin{equation}
+    h_t \in \mathbb{R}^{d}.
+\end{equation}
+标准 tied 输出 logits 为
+\begin{equation}
+    z_t = W h_t + b,
+\end{equation}
+其中 $b \in \mathbb{R}^{V}$ 为输出偏置项。
+
+本文首先将 S1--S7 统一理解为对 tied 矩阵 $W$ 的不同松绑方式，并进一步在 S8--S10
+中考察 untied 输入 embedding 矩阵 $E$ 上的三种松绑消融。具体而言，不同变体的核心
+区别在于输入侧实际使用的有效矩阵 $E_{\mathrm{eff}}$ 和输出侧实际使用的有效矩阵
+$U_{\mathrm{eff}}$：
+\begin{equation}
+    e_t = E_{\mathrm{eff}}[x_t], \qquad
+    z_t = U_{\mathrm{eff}} h_t + b.
+\end{equation}
+
+\paragraph{S1: 标准 tied，不松绑。}
+S1 是最基础的 weight tying 结构。输入侧和输出侧完全使用同一个矩阵：
+\begin{equation}
+    E_{\mathrm{eff}} = W, \qquad
+    U_{\mathrm{eff}} = W.
+\end{equation}
+因此输入表示为
+\begin{equation}
+    e_t = W[x_t],
+\end{equation}
+输出 logits 为
+\begin{equation}
+    z_t = W h_t + b.
+\end{equation}
+
+也就是说，S1 没有任何额外自由度，输入 embedding 和输出 unembedding 被强制完全相同。
+该模型作为标准 tied baseline，用于衡量其他松绑方式带来的结构变化。
+
+\paragraph{S2: Full untied，完全松绑。}
+S2 是最彻底的松绑方式。输入侧和输出侧各自学习一个完整矩阵：
+\begin{equation}
+    E_{\mathrm{eff}} = E, \qquad
+    U_{\mathrm{eff}} = U,
+\end{equation}
+其中
+\begin{equation}
+    E \in \mathbb{R}^{V \times d}, \qquad
+    U \in \mathbb{R}^{V \times d}, \qquad
+    E \neq U.
+\end{equation}
+输入表示为
+\begin{equation}
+    e_t = E[x_t],
+\end{equation}
+输出 logits 为
+\begin{equation}
+    z_t = U h_t + b.
+\end{equation}
+
+S2 的自由度最大，但参数成本也最高。相较于标准 tied 结构，它额外引入了一整套
+$V \times d$ 规模的矩阵参数，用于完全解除输入 embedding 与输出 unembedding 之间的共享约束。
+
+\paragraph{S3: $\beta$ 向量松绑，输入侧 rank-1 全局平移松绑。}
+S3 保留共享矩阵 $W$，但在输入侧加入一个可学习向量：
+\begin{equation}
+    \beta \in \mathbb{R}^{d}.
+\end{equation}
+输入侧有效矩阵可以写成
+\begin{equation}
+    E_{\mathrm{eff}} = W - \mathbf{1}\beta^\top,
+\end{equation}
+其中
+\begin{equation}
+    \mathbf{1} \in \mathbb{R}^{V}
+\end{equation}
+是全 1 向量。因此，$\mathbf{1}\beta^\top \in \mathbb{R}^{V \times d}$，
+且该矩阵的每一行都是同一个 $\beta^\top$。
+
+对单个 token 来说，输入表示为
+\begin{equation}
+    e_t = W[x_t] - \beta.
+\end{equation}
+输出侧不变：
+\begin{equation}
+    U_{\mathrm{eff}} = W,
+\end{equation}
+因此
+\begin{equation}
+    z_t = W h_t + b.
+\end{equation}
+
+该模型可以理解为一种非常特殊的加性低秩松绑：
+\begin{equation}
+    E_{\mathrm{eff}} = W + \Delta W,
+\end{equation}
+其中
+\begin{equation}
+    \Delta W = -\mathbf{1}\beta^\top.
+\end{equation}
+由于 $\mathbf{1}\beta^\top$ 是一个 rank-1 矩阵，S3 本质上是 rank-1 的全局平移松绑。
+它不是给每个 token 单独学习修正，而是让所有 token 共享同一个平移方向。
+
+\paragraph{S4: 输入侧常规 LoRA 加性松绑。}
+S4 在输入 embedding 矩阵上做常规加性 LoRA 松绑。输入侧有效矩阵为
+\begin{equation}
+    E_{\mathrm{eff}} = W + \Delta W_{\mathrm{in}},
+\end{equation}
+其中
+\begin{equation}
+    \Delta W_{\mathrm{in}} = A_{\mathrm{in}}B_{\mathrm{in}},
+\end{equation}
+并且
+\begin{equation}
+    A_{\mathrm{in}} \in \mathbb{R}^{V \times r}, \qquad
+    B_{\mathrm{in}} \in \mathbb{R}^{r \times d}, \qquad
+    r \ll d.
+\end{equation}
+因此
+\begin{equation}
+    E_{\mathrm{eff}} = W + A_{\mathrm{in}}B_{\mathrm{in}},
+\end{equation}
+输入表示为
+\begin{equation}
+    e_t = \left(W + A_{\mathrm{in}}B_{\mathrm{in}}\right)[x_t].
+\end{equation}
+输出侧仍然使用原始共享矩阵：
+\begin{equation}
+    U_{\mathrm{eff}} = W,
+\end{equation}
+即
+\begin{equation}
+    z_t = W h_t + b.
+\end{equation}
+
+S4 的含义是只松绑输入 embedding，不松绑输出 unembedding。该方式比 full untied
+参数量更低，但由于 $A_{\mathrm{in}} \in \mathbb{R}^{V \times r}$，额外参数量仍然包含
+\begin{equation}
+    Vr + rd.
+\end{equation}
+当词表大小 $V$ 很大时，$Vr$ 这一项仍然会带来明显开销。
+
+\paragraph{S5: 输出侧常规 LoRA 加性松绑。}
+S5 与 S4 对称，但 LoRA 加在输出 projection 上。输入侧保持 tied：
+\begin{equation}
+    E_{\mathrm{eff}} = W,
+\end{equation}
+因此
+\begin{equation}
+    e_t = W[x_t].
+\end{equation}
+输出侧有效矩阵为
+\begin{equation}
+    U_{\mathrm{eff}} = W + \Delta W_{\mathrm{out}},
+\end{equation}
+其中
+\begin{equation}
+    \Delta W_{\mathrm{out}} = A_{\mathrm{out}}B_{\mathrm{out}},
+\end{equation}
+并且
+\begin{equation}
+    A_{\mathrm{out}} \in \mathbb{R}^{V \times r}, \qquad
+    B_{\mathrm{out}} \in \mathbb{R}^{r \times d}, \qquad
+    r \ll d.
+\end{equation}
+因此
+\begin{equation}
+    U_{\mathrm{eff}} = W + A_{\mathrm{out}}B_{\mathrm{out}},
+\end{equation}
+输出 logits 为
+\begin{equation}
+    z_t =
+    \left(W + A_{\mathrm{out}}B_{\mathrm{out}}\right)h_t + b.
+\end{equation}
+
+S5 的含义是输入侧仍然 tied，输出侧通过常规 LoRA 获得额外自由度。S4 和 S5
+构成一组输入侧加性 LoRA 与输出侧加性 LoRA 的结构对照。
+
+\paragraph{S6: 输入侧乘性低秩松绑。}
+S6 是输入侧的乘性松绑方式。由于语言模型中通常有 $V \gg d$，直接在
+$V \times d$ 的 embedding 矩阵上做 LoRA 会引入与词表大小 $V$ 相关的参数。
+因此，S6 不在词表维度上引入低秩矩阵，而是在隐藏维度上右乘一个低秩变换。
+
+输入侧有效矩阵写成
+\begin{equation}
+    E_{\mathrm{eff}} = W M_{\mathrm{in}},
+\end{equation}
+其中
+\begin{equation}
+    M_{\mathrm{in}} \in \mathbb{R}^{d \times d}.
+\end{equation}
+为了保持接近原始 tied embedding，将 $M_{\mathrm{in}}$ 写成单位矩阵加低秩修正：
+\begin{equation}
+    M_{\mathrm{in}} = I_d + \Delta M_{\mathrm{in}},
+\end{equation}
+其中
+\begin{equation}
+    \Delta M_{\mathrm{in}} = P_{\mathrm{in}}Q_{\mathrm{in}},
+\end{equation}
+并且
+\begin{equation}
+    P_{\mathrm{in}} \in \mathbb{R}^{d \times r}, \qquad
+    Q_{\mathrm{in}} \in \mathbb{R}^{r \times d}, \qquad
+    r \ll d.
+\end{equation}
+所以
+\begin{equation}
+    E_{\mathrm{eff}} =
+    W(I_d + P_{\mathrm{in}}Q_{\mathrm{in}}).
+\end{equation}
+对单个 token，有
+\begin{equation}
+    e_t =
+    W[x_t](I_d + P_{\mathrm{in}}Q_{\mathrm{in}}).
+\end{equation}
+输出侧不变：
+\begin{equation}
+    U_{\mathrm{eff}} = W,
+\end{equation}
+即
+\begin{equation}
+    z_t = W h_t + b.
+\end{equation}
+
+S6 的含义是不额外学习一个 $V \times r$ 的词表侧 LoRA，而是在 hidden dimension
+上学习一个 $d \times d$ 的低秩变换。其额外参数量为
+\begin{equation}
+    dr + rd = 2dr,
+\end{equation}
+不随词表大小 $V$ 增长。需要强调的是，这里不是额外插入一个普通线性层，而是把输入
+embedding 矩阵重新参数化为
+\begin{equation}
+    E_{\mathrm{eff}} =
+    W(I_d + P_{\mathrm{in}}Q_{\mathrm{in}}).
+\end{equation}
+也就是说，模型实际使用的是一个被乘性松绑后的有效输入矩阵。
+
+\paragraph{S7: 输出侧乘性低秩松绑。}
+S7 是 S6 的输出侧版本。输入侧保持 tied：
+\begin{equation}
+    E_{\mathrm{eff}} = W,
+\end{equation}
+因此
+\begin{equation}
+    e_t = W[x_t].
+\end{equation}
+输出侧使用乘性松绑矩阵：
+\begin{equation}
+    U_{\mathrm{eff}} = W M_{\mathrm{out}},
+\end{equation}
+其中
+\begin{equation}
+    M_{\mathrm{out}} = I_d + \Delta M_{\mathrm{out}},
+\end{equation}
+\begin{equation}
+    \Delta M_{\mathrm{out}} = P_{\mathrm{out}}Q_{\mathrm{out}},
+\end{equation}
+并且
+\begin{equation}
+    P_{\mathrm{out}} \in \mathbb{R}^{d \times r}, \qquad
+    Q_{\mathrm{out}} \in \mathbb{R}^{r \times d}, \qquad
+    r \ll d.
+\end{equation}
+因此
+\begin{equation}
+    U_{\mathrm{eff}} =
+    W(I_d + P_{\mathrm{out}}Q_{\mathrm{out}}),
+\end{equation}
+输出 logits 为
+\begin{equation}
+    z_t =
+    W(I_d + P_{\mathrm{out}}Q_{\mathrm{out}})h_t + b.
+\end{equation}
+
+S7 的含义是不在词表维度上给输出矩阵加 LoRA，而是在输出 projection 的隐藏维度方向
+做乘性低秩松绑。S6 和 S7 构成一组输入侧乘性松绑与输出侧乘性松绑的结构对照。
+
+\paragraph{S8: Untied Embedding + $\beta$，独立输入矩阵上的 rank-1 全局平移松绑。}
+S8 以 S2 的 full untied 结构为基础，但进一步在独立输入 embedding 矩阵 $E$ 上加入
+rank-1 全局平移松绑。输出侧仍然使用独立的输出矩阵 $U$。
+
+输入侧有效矩阵为
+\begin{equation}
+    E_{\mathrm{eff}} = E - \mathbf{1}\beta_E^\top,
+\end{equation}
+其中
+\begin{equation}
+    \beta_E \in \mathbb{R}^{d}, \qquad
+    \mathbf{1} \in \mathbb{R}^{V}.
+\end{equation}
+对单个 token，有
+\begin{equation}
+    e_t = E[x_t] - \beta_E.
+\end{equation}
+输出侧保持 untied：
+\begin{equation}
+    U_{\mathrm{eff}} = U,
+\end{equation}
+因此
+\begin{equation}
+    z_t = U h_t + b.
+\end{equation}
+
+S8 用于检验在输入输出已经完全 untied 的情况下，输入 embedding 层是否仍然受益于
+rank-1 的全局平移校正。与 S3 不同，S8 的平移作用在独立输入矩阵 $E$ 上，而不是
+共享矩阵 $W$ 上。
+
+\paragraph{S9: Untied Embedding + Additive LoRA，独立输入矩阵上的常规 LoRA 松绑。}
+S9 同样以 S2 的 full untied 结构为基础，但在独立输入 embedding 矩阵 $E$ 上加入
+常规加性 LoRA 修正。输入侧有效矩阵为
+\begin{equation}
+    E_{\mathrm{eff}} = E + \Delta E_{\mathrm{in}},
+\end{equation}
+其中
+\begin{equation}
+    \Delta E_{\mathrm{in}} = A_{E}B_{E},
+\end{equation}
+并且
+\begin{equation}
+    A_{E} \in \mathbb{R}^{V \times r}, \qquad
+    B_{E} \in \mathbb{R}^{r \times d}, \qquad
+    r \ll d.
+\end{equation}
+因此
+\begin{equation}
+    e_t = \left(E + A_EB_E\right)[x_t].
+\end{equation}
+输出侧仍然为
+\begin{equation}
+    U_{\mathrm{eff}} = U,
+\end{equation}
+即
+\begin{equation}
+    z_t = U h_t + b.
+\end{equation}
+
+S9 用于考察常规词表维度 LoRA 是否能够在 full untied 的输入 embedding 上带来额外收益。
+与 S4 不同，S9 的低秩加性修正不是对共享矩阵 $W$ 进行松绑，而是对已经独立学习的
+输入矩阵 $E$ 进行进一步重参数化。
+
+\paragraph{S10: Untied Embedding + Multiplicative LoRA，独立输入矩阵上的乘性低秩松绑。}
+S10 是 S8--S9 的乘性版本。它不在词表维度上对 $E$ 加入 $V \times r$ 的低秩增量，
+而是在隐藏维度上右乘一个低秩变换。输入侧有效矩阵为
+\begin{equation}
+    E_{\mathrm{eff}} = E M_E,
+\end{equation}
+其中
+\begin{equation}
+    M_E = I_d + \Delta M_E,
+\end{equation}
+\begin{equation}
+    \Delta M_E = P_E Q_E,
+\end{equation}
+并且
+\begin{equation}
+    P_E \in \mathbb{R}^{d \times r}, \qquad
+    Q_E \in \mathbb{R}^{r \times d}, \qquad
+    r \ll d.
+\end{equation}
+因此
+\begin{equation}
+    E_{\mathrm{eff}} = E(I_d+P_EQ_E),
+\end{equation}
+对单个 token，有
+\begin{equation}
+    e_t = E[x_t](I_d+P_EQ_E).
+\end{equation}
+输出侧保持独立矩阵：
+\begin{equation}
+    U_{\mathrm{eff}} = U,
+\end{equation}
+即
+\begin{equation}
+    z_t = U h_t + b.
+\end{equation}
+
+S10 用于检验在 full untied 的输入 embedding 上，隐藏维度乘性松绑是否比词表维度加性 LoRA
+更具参数效率。其额外参数量为 $2dr$，不随词表大小 $V$ 增长。与 S6 不同，S10 的乘性
+低秩变换作用在独立输入矩阵 $E$ 上，而不是共享矩阵 $W$ 上。
+
+\subsection{十个模型的统一对比}
+
+\begin{table}[htbp]
+\centering
+\caption{S1--S10 模型变体的有效输入矩阵与有效输出矩阵。}
+\label{tab:s1_s10_variants}
+\begin{tabular}{llll}
+\toprule
+模型 & 松绑方式 & $E_{\mathrm{eff}}$ & $U_{\mathrm{eff}}$ \\
+\midrule
+S1 & 标准 tied（不松绑） & $W$ & $W$ \\
+S2 & full untied（完全松绑） & $E$ & $U$ \\
+S3 & 输入侧 rank-1 全局平移松绑 & $W-\mathbf{1}\beta^\top$ & $W$ \\
+S4 & 输入侧常规 LoRA 加性松绑 & $W+A_{\mathrm{in}}B_{\mathrm{in}}$ & $W$ \\
+S5 & 输出侧常规 LoRA 加性松绑 & $W$ & $W+A_{\mathrm{out}}B_{\mathrm{out}}$ \\
+S6 & 输入侧乘性低秩松绑 & $W(I_d+P_{\mathrm{in}}Q_{\mathrm{in}})$ & $W$ \\
+S7 & 输出侧乘性低秩松绑 & $W$ & $W(I_d+P_{\mathrm{out}}Q_{\mathrm{out}})$ \\
+S8 & untied 输入侧 rank-1 全局平移松绑 & $E-\mathbf{1}\beta_E^\top$ & $U$ \\
+S9 & untied 输入侧常规 LoRA 加性松绑 & $E+A_EB_E$ & $U$ \\
+S10 & untied 输入侧乘性低秩松绑 & $E(I_d+P_EQ_E)$ & $U$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{十个模型的逻辑关系}
+
+上述十个模型可以分为五类。
+
+\paragraph{第一类：基线模型。}
+S1 为标准 tied（不松绑）的基线：
+\begin{equation}
+    E_{\mathrm{eff}} = W, \qquad
+    U_{\mathrm{eff}} = W.
+\end{equation}
+S2 为 full untied（完全松绑）的上界参照：
+\begin{equation}
+    E_{\mathrm{eff}} = E, \qquad
+    U_{\mathrm{eff}} = U.
+\end{equation}
+
+\paragraph{第二类：输入侧加性松绑。}
+S3 和 S4 都只改变输入侧，输出侧仍然满足
+\begin{equation}
+    U_{\mathrm{eff}} = W.
+\end{equation}
+其中，S3 使用 rank-1 的全局平移松绑：
+\begin{equation}
+    E_{\mathrm{eff}} = W-\mathbf{1}\beta^\top,
+\end{equation}
+S4 使用常规输入侧 LoRA 松绑：
+\begin{equation}
+    E_{\mathrm{eff}} = W+A_{\mathrm{in}}B_{\mathrm{in}}.
+\end{equation}
+
+\paragraph{第三类：输出侧加性松绑。}
+S5 只改变输出侧，输入侧仍然满足
+\begin{equation}
+    E_{\mathrm{eff}} = W,
+\end{equation}
+而输出侧为
+\begin{equation}
+    U_{\mathrm{eff}} = W+A_{\mathrm{out}}B_{\mathrm{out}}.
+\end{equation}
+
+\paragraph{第四类：乘性低秩松绑。}
+S6 和 S7 将低秩自由度放在隐藏维度 $d$ 上，而不是词表维度 $V$ 上。
+输入侧乘性松绑为
+\begin{equation}
+    \text{S6:}\quad
+    E_{\mathrm{eff}} = W(I_d+P_{\mathrm{in}}Q_{\mathrm{in}}),
+\end{equation}
+输出侧乘性松绑为
+\begin{equation}
+    \text{S7:}\quad
+    U_{\mathrm{eff}} = W(I_d+P_{\mathrm{out}}Q_{\mathrm{out}}).
+\end{equation}
+这两种方法的额外参数量均为 $2dr$，不随词表大小 $V$ 增长。
+
+\paragraph{第五类：untied 输入 embedding 上的松绑消融。}
+S8--S10 以 S2 的 full untied 结构为基础，保持输出侧为独立矩阵
+\begin{equation}
+    U_{\mathrm{eff}} = U,
+\end{equation}
+并只在独立输入 embedding 矩阵 $E$ 上加入额外松绑。三种形式分别为
+\begin{equation}
+    \text{S8:}\quad
+    E_{\mathrm{eff}} = E-\mathbf{1}\beta_E^\top,
+\end{equation}
+\begin{equation}
+    \text{S9:}\quad
+    E_{\mathrm{eff}} = E+A_EB_E,
+\end{equation}
+以及
+\begin{equation}
+    \text{S10:}\quad
+    E_{\mathrm{eff}} = E(I_d+P_EQ_E).
+\end{equation}
+这组三个模型用于判断本文讨论的三类输入侧松绑形式是否只在 tied 约束下有效，还是在
+输入输出已经完全 untied 的情况下仍然具有额外作用。
+
+\subsection{方法概述}
+
+总体而言，本文将不同模型统一理解为对 embedding/unembedding matrix 的结构化松绑。
+标准 tied 模型直接令输入矩阵和输出矩阵均等于 $W$；full untied 模型则完全解除该约束，
+分别学习独立的输入矩阵 $E$ 和输出矩阵 $U$。在此基础上，我们进一步比较三类轻量松绑方式：
+单向量平移松绑、常规 LoRA 加性松绑，以及隐藏维度上的乘性松绑；同时，我们在 untied
+输入 embedding 矩阵 $E$ 上加入同样三种形式，作为输入层松绑的消融对照。
+
+对于单向量平移松绑，我们令
+\begin{equation}
+    E_{\mathrm{eff}} = W-\mathbf{1}\beta^\top,
+\end{equation}
+其中 $\beta\in\mathbb{R}^{d}$，$\mathbf{1}\in\mathbb{R}^{V}$。该形式等价于对 $W$
+施加一个 rank-1 的加性修正。
+
+对于常规 LoRA 松绑，我们分别在输入侧或输出侧引入低秩加性矩阵：
+\begin{equation}
+    E_{\mathrm{eff}} = W+A_{\mathrm{in}}B_{\mathrm{in}},
+\end{equation}
+或
+\begin{equation}
+    U_{\mathrm{eff}} = W+A_{\mathrm{out}}B_{\mathrm{out}}.
+\end{equation}
+其中 $A\in\mathbb{R}^{V\times r}$，$B\in\mathbb{R}^{r\times d}$。
+该方法直接在 $V\times d$ 的词表矩阵上施加低秩修正。
+
+考虑到语言模型中通常 $V\gg d$，我们进一步引入乘性松绑，将有效矩阵写为共享矩阵右乘
+一个隐藏维度上的低秩变换：
+\begin{equation}
+    E_{\mathrm{eff}} = W(I_d+P_{\mathrm{in}}Q_{\mathrm{in}}),
+\end{equation}
+或
+\begin{equation}
+    U_{\mathrm{eff}} = W(I_d+P_{\mathrm{out}}Q_{\mathrm{out}}).
+\end{equation}
+其中 $P\in\mathbb{R}^{d\times r}$，$Q\in\mathbb{R}^{r\times d}$。
+该设计只在隐藏维度上引入 $2dr$ 个额外参数，不随词表大小 $V$ 增长。
+从计算等价性上看，该乘性形式等同于在 embedding 特征后施加一个带残差结构的线性变换；
+但在实现与推理时，我们直接对输入或输出 embedding matrix 本身进行重参数化，从而避免
+修改模型主干结构，并减少额外算子带来的推理开销。
+
+对于 untied 输入 embedding 的消融模型，我们将上述三类松绑形式从共享矩阵 $W$ 迁移到
+独立输入矩阵 $E$ 上，即以下三种形式：
+\begin{equation}
+    E_{\mathrm{eff}} = E-\mathbf{1}\beta_E^\top,
+\end{equation}
+或者
+\begin{equation}
+    E_{\mathrm{eff}} = E+A_EB_E,
+\end{equation}
+或
+\begin{equation}
+    E_{\mathrm{eff}} = E(I_d+P_EQ_E),
+\end{equation}
+同时保持输出侧 $U_{\mathrm{eff}}=U$。该设置用于区分改进是否来自 tied 约束的缓解，
+还是来自输入 embedding 层本身的额外重参数化能力。

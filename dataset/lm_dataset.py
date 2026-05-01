@@ -35,11 +35,16 @@ def post_processing_chat(prompt_content, empty_think_ratio=0.2):
     return prompt_content
 
 class PretrainDataset(Dataset):
-    def __init__(self, data_path, tokenizer, max_length=512):
+    def __init__(self, data_path, tokenizer, max_length=512, start_index=0, end_index=None):
         super().__init__()
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.samples = load_dataset('json', data_files=data_path, split='train')
+        if start_index < 0:
+            start_index = max(len(self.samples) + start_index, 0)
+        end_index = len(self.samples) if end_index is None or end_index < 0 else min(end_index, len(self.samples))
+        if start_index > 0 or end_index < len(self.samples):
+            self.samples = self.samples.select(range(start_index, end_index))
 
     def __len__(self):
         return len(self.samples)

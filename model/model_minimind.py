@@ -15,6 +15,9 @@ class MiniMindConfig(PretrainedConfig):
         self.num_hidden_layers = num_hidden_layers
         self.use_moe = use_moe
         self.tie_word_embeddings = kwargs.get("tie_word_embeddings", True)
+        self.lm_head_bias = kwargs.get("lm_head_bias", False)
+        self.embedding_variant = kwargs.get("embedding_variant", "s1").lower()
+        self.embedding_variant_rank = kwargs.get("embedding_variant_rank", 32)
         self.dropout = kwargs.get("dropout", 0.0)
         self.vocab_size = kwargs.get("vocab_size", 6400)
         self.bos_token_id = kwargs.get("bos_token_id", 1)
@@ -198,7 +201,10 @@ class MiniMindModel(nn.Module):
         super().__init__()
         self.config = config
         self.vocab_size, self.num_hidden_layers = config.vocab_size, config.num_hidden_layers
+        self.embedding_variant = getattr(config, "embedding_variant", "s1").lower()
+        self.embedding_variant_rank = getattr(config, "embedding_variant_rank", 32)
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
+        self._init_input_variant_params()
         self.dropout = nn.Dropout(config.dropout)
         self.layers = nn.ModuleList([MiniMindBlock(l, config) for l in range(self.num_hidden_layers)])
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -206,12 +212,43 @@ class MiniMindModel(nn.Module):
         self.register_buffer("freqs_cos", freqs_cos, persistent=False)
         self.register_buffer("freqs_sin", freqs_sin, persistent=False)
 
+    def _zero_init(self, module):
+        if hasattr(module, "weight"):
+            nn.init.zeros_(module.weight)
+
+    def _init_input_variant_params(self):
+        rank = self.embedding_variant_rank
+        hidden_size = self.config.hidden_size
+        vocab_size = self.config.vocab_size
+        if self.embedding_variant in {"s3", "s8"}:
+            self.embedding_beta = nn.Parameter(torch.zeros(hidden_size))
+        elif self.embedding_variant in {"s4", "s9"}:
+            self.embedding_lora_a = nn.Embedding(vocab_size, rank)
+            self.embedding_lora_b = nn.Linear(rank, hidden_size, bias=False)
+            nn.init.normal_(self.embedding_lora_a.weight, mean=0.0, std=0.02)
+            self._zero_init(self.embedding_lora_b)
+        elif self.embedding_variant in {"s6", "s10"}:
+            self.embedding_mul_a = nn.Linear(hidden_size, rank, bias=False)
+            self.embedding_mul_b = nn.Linear(rank, hidden_size, bias=False)
+            nn.init.normal_(self.embedding_mul_a.weight, mean=0.0, std=0.02)
+            self._zero_init(self.embedding_mul_b)
+
+    def _embed(self, input_ids):
+        embeddings = self.embed_tokens(input_ids)
+        if self.embedding_variant in {"s3", "s8"}:
+            return embeddings - self.embedding_beta
+        if self.embedding_variant in {"s4", "s9"}:
+            return embeddings + self.embedding_lora_b(self.embedding_lora_a(input_ids))
+        if self.embedding_variant in {"s6", "s10"}:
+            return embeddings + self.embedding_mul_b(self.embedding_mul_a(embeddings))
+        return embeddings
+
     def forward(self, input_ids, attention_mask=None, past_key_values=None, use_cache=False, **kwargs):
         batch_size, seq_length = input_ids.shape
         if hasattr(past_key_values, 'layers'): past_key_values = None
         past_key_values = past_key_values or [None] * len(self.layers)
         start_pos = past_key_values[0][0].shape[1] if past_key_values[0] is not None else 0
-        hidden_states = self.dropout(self.embed_tokens(input_ids))
+        hidden_states = self.dropout(self._embed(input_ids))
         position_embeddings = (self.freqs_cos[start_pos:start_pos + seq_length], self.freqs_sin[start_pos:start_pos + seq_length])
         presents = []
         for layer, past_key_value in zip(self.layers, past_key_values):
@@ -232,15 +269,51 @@ class MiniMindForCausalLM(PreTrainedModel, GenerationMixin):
     def __init__(self, config: MiniMindConfig = None):
         self.config = config or MiniMindConfig()
         super().__init__(self.config)
+        self.embedding_variant = getattr(self.config, "embedding_variant", "s1").lower()
+        self.embedding_variant_rank = getattr(self.config, "embedding_variant_rank", 32)
         self.model = MiniMindModel(self.config)
-        self.lm_head = nn.Linear(self.config.hidden_size, self.config.vocab_size, bias=False)
+        self.lm_head = nn.Linear(self.config.hidden_size, self.config.vocab_size, bias=getattr(self.config, "lm_head_bias", False))
         if getattr(self.config, "tie_word_embeddings", True):
             self.model.embed_tokens.weight = self.lm_head.weight
+        self._init_output_variant_params()
+
+    def _zero_init(self, module):
+        if hasattr(module, "weight"):
+            nn.init.zeros_(module.weight)
+
+    def _init_output_variant_params(self):
+        rank = self.embedding_variant_rank
+        hidden_size = self.config.hidden_size
+        vocab_size = self.config.vocab_size
+        if self.embedding_variant == "s5":
+            self.output_lora_a = nn.Embedding(vocab_size, rank)
+            self.output_lora_b = nn.Linear(hidden_size, rank, bias=False)
+            nn.init.normal_(self.output_lora_a.weight, mean=0.0, std=0.02)
+            self._zero_init(self.output_lora_b)
+        elif self.embedding_variant == "s7":
+            self.output_mul_a = nn.Linear(hidden_size, rank, bias=False)
+            self.output_mul_b = nn.Linear(rank, hidden_size, bias=False)
+            nn.init.normal_(self.output_mul_a.weight, mean=0.0, std=0.02)
+            self._zero_init(self.output_mul_b)
+        elif self.embedding_variant == "s11":
+            self.output_beta = nn.Parameter(torch.zeros(hidden_size))
+
+    def _compute_logits(self, hidden_states):
+        if self.embedding_variant == "s5":
+            base_logits = self.lm_head(hidden_states)
+            delta_hidden = self.output_lora_b(hidden_states)
+            delta_logits = F.linear(delta_hidden, self.output_lora_a.weight)
+            return base_logits + delta_logits
+        if self.embedding_variant == "s7":
+            return self.lm_head(hidden_states + self.output_mul_b(self.output_mul_a(hidden_states)))
+        if self.embedding_variant == "s11":
+            return self.lm_head(hidden_states - self.output_beta)
+        return self.lm_head(hidden_states)
     
     def forward(self, input_ids, attention_mask=None, past_key_values=None, use_cache=False, logits_to_keep=0, labels=None, **kwargs):
         hidden_states, past_key_values, aux_loss = self.model(input_ids, attention_mask, past_key_values, use_cache, **kwargs)
         slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
-        logits = self.lm_head(hidden_states[:, slice_indices, :])
+        logits = self._compute_logits(hidden_states[:, slice_indices, :])
         loss = None
         if labels is not None:
             x, y = logits[..., :-1, :].contiguous(), labels[..., 1:].contiguous()
