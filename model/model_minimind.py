@@ -220,14 +220,14 @@ class MiniMindModel(nn.Module):
         rank = self.embedding_variant_rank
         hidden_size = self.config.hidden_size
         vocab_size = self.config.vocab_size
-        if self.embedding_variant in {"s3", "s8"}:
+        if self.embedding_variant in {"s3", "s8", "s12"}:
             self.embedding_beta = nn.Parameter(torch.zeros(hidden_size))
-        elif self.embedding_variant in {"s4", "s9"}:
+        if self.embedding_variant in {"s4", "s9"}:
             self.embedding_lora_a = nn.Embedding(vocab_size, rank)
             self.embedding_lora_b = nn.Linear(rank, hidden_size, bias=False)
             nn.init.normal_(self.embedding_lora_a.weight, mean=0.0, std=0.02)
             self._zero_init(self.embedding_lora_b)
-        elif self.embedding_variant in {"s6", "s10"}:
+        if self.embedding_variant in {"s6", "s10", "s12"}:
             self.embedding_mul_a = nn.Linear(hidden_size, rank, bias=False)
             self.embedding_mul_b = nn.Linear(rank, hidden_size, bias=False)
             nn.init.normal_(self.embedding_mul_a.weight, mean=0.0, std=0.02)
@@ -235,8 +235,10 @@ class MiniMindModel(nn.Module):
 
     def _embed(self, input_ids):
         embeddings = self.embed_tokens(input_ids)
+        if self.embedding_variant == "s12":
+            return embeddings - self.embedding_beta + self.embedding_mul_b(self.embedding_mul_a(embeddings))
         if self.embedding_variant in {"s3", "s8"}:
-            return embeddings - self.embedding_beta
+            embeddings = embeddings - self.embedding_beta
         if self.embedding_variant in {"s4", "s9"}:
             return embeddings + self.embedding_lora_b(self.embedding_lora_a(input_ids))
         if self.embedding_variant in {"s6", "s10"}:

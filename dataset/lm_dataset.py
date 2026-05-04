@@ -3,7 +3,8 @@ import torch
 import json
 import os
 import random
-from datasets import load_dataset, Features, Sequence, Value
+from pathlib import Path
+from datasets import load_dataset, load_from_disk, Features, Sequence, Value
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 def pre_processing_chat(conversations, add_system_ratio=0.2):
@@ -39,18 +40,47 @@ class PretrainDataset(Dataset):
         super().__init__()
         self.tokenizer = tokenizer
         self.max_length = max_length
-        self.samples = load_dataset('json', data_files=data_path, split='train')
+        self.samples = self.load_samples(data_path)
         if start_index < 0:
             start_index = max(len(self.samples) + start_index, 0)
         end_index = len(self.samples) if end_index is None or end_index < 0 else min(end_index, len(self.samples))
         if start_index > 0 or end_index < len(self.samples):
             self.samples = self.samples.select(range(start_index, end_index))
 
+    def load_samples(self, data_path):
+        path = Path(data_path)
+        if path.is_dir() and (path / "dataset_info.json").exists() and (path / "state.json").exists():
+            return load_from_disk(str(path))
+
+        suffix = path.suffix.lower()
+        if path.is_dir():
+            parquet_files = sorted(str(p) for p in path.glob("*.parquet"))
+            jsonl_files = sorted(str(p) for p in path.glob("*.jsonl"))
+            if parquet_files:
+                return load_dataset("parquet", data_files=parquet_files, split="train")
+            if jsonl_files:
+                return load_dataset("json", data_files=jsonl_files, split="train")
+        if any(ch in data_path for ch in "*?[]"):
+            format_name = "parquet" if ".parquet" in data_path else "json"
+            return load_dataset(format_name, data_files=data_path, split="train")
+        if suffix == ".parquet":
+            return load_dataset("parquet", data_files=data_path, split="train")
+        return load_dataset("json", data_files=data_path, split="train")
+
     def __len__(self):
         return len(self.samples)
 
     def __getitem__(self, index):
         sample = self.samples[index]
+        if "input_ids" in sample:
+            input_ids = list(sample["input_ids"])[:self.max_length]
+            if len(input_ids) < self.max_length:
+                input_ids += [self.tokenizer.pad_token_id] * (self.max_length - len(input_ids))
+            input_ids = torch.tensor(input_ids, dtype=torch.long)
+            labels = input_ids.clone()
+            labels[input_ids == self.tokenizer.pad_token_id] = -100
+            return input_ids, labels
+
         tokens = self.tokenizer(str(sample['text']), add_special_tokens=False, max_length=self.max_length - 2, truncation=True).input_ids
         tokens = [self.tokenizer.bos_token_id] + tokens + [self.tokenizer.eos_token_id]
         input_ids = tokens + [self.tokenizer.pad_token_id] * (self.max_length - len(tokens))

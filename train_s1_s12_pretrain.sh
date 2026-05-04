@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# S1-S11 dense pretrain runner.
+# S1-S12 dense pretrain runner.
 #
 # Examples:
-#   bash train_s1_s10_pretrain.sh
-#   VARIANTS=s3,s4 MAX_STEPS=5 DATA_PATH=../dataset/pretrain_t2t_mini.jsonl bash train_s1_s10_pretrain.sh
-#   START=s4 END=s11 FROM_RESUME=1 bash train_s1_s10_pretrain.sh
+#   bash train_s1_s12_pretrain.sh
+#   VARIANTS=s3,s4 MAX_STEPS=5 DATA_PATH=../dataset/pretrain_t2t_mini.jsonl bash train_s1_s12_pretrain.sh
+#   START=s4 END=s12 FROM_RESUME=1 bash train_s1_s12_pretrain.sh
 # ==============================================================================
 set -euo pipefail
 
@@ -14,7 +14,7 @@ ROOT=$(pwd)
 
 TORCH24_PREFIX="/home/wz/anaconda3/envs/torch24"
 if [[ ! -x "$TORCH24_PREFIX/bin/python" ]]; then
-    echo "[s1-s11] 找不到 torch24 Python: $TORCH24_PREFIX/bin/python"
+    echo "[s1-s12] 找不到 torch24 Python: $TORCH24_PREFIX/bin/python"
     exit 1
 fi
 
@@ -33,6 +33,7 @@ DATA_PATH="${DATA_PATH:-../dataset/pretrain_t2t.jsonl}"
 SAVE_DIR="${SAVE_DIR:-../out}"
 CHECKPOINT_DIR="${CHECKPOINT_DIR:-../checkpoints}"
 WEIGHT_PREFIX="${WEIGHT_PREFIX:-pretrain_v2}"
+SEED="${SEED:-42}"
 RANK="${RANK:-32}"
 BATCH_SIZE="${BATCH_SIZE:-32}"
 ACCUMULATION_STEPS="${ACCUMULATION_STEPS:-6}"
@@ -46,14 +47,14 @@ FROM_RESUME="${FROM_RESUME:-0}"
 MAX_STEPS="${MAX_STEPS:-0}"
 LM_HEAD_BIAS="${LM_HEAD_BIAS:-1}"
 TRAIN_SPLIT_RATIO="${TRAIN_SPLIT_RATIO:-0.99}"
-LOG_DIR="${LOG_DIR:-$ROOT/logs/s1-s11-pretrain-v2}"
+LOG_DIR="${LOG_DIR:-$ROOT/logs/s1-s12-pretrain-v2}"
 
 mkdir -p "$LOG_DIR"
 
 export CUDA_VISIBLE_DEVICES="$GPUS"
 export PYTHONUNBUFFERED=1
 
-all_variants=(s1 s2 s3 s4 s5 s6 s7 s8 s9 s10 s11)
+all_variants=(s1 s2 s3 s4 s5 s6 s7 s8 s9 s10 s11 s12)
 
 selected_variants=()
 if [[ -n "${VARIANTS:-}" ]]; then
@@ -69,18 +70,19 @@ else
 fi
 
 if [[ "${#selected_variants[@]}" -eq 0 ]]; then
-    echo "[s1-s11] 没有匹配到要训练的变体，请检查 VARIANTS/START/END"
+    echo "[s1-s12] 没有匹配到要训练的变体，请检查 VARIANTS/START/END"
     exit 1
 fi
 
 echo "================================================================"
-echo "[s1-s11] start at $(date '+%F %T')"
+echo "[s1-s12] start at $(date '+%F %T')"
 echo "  GPUS               = $GPUS  (DDP nproc=$NPROC)"
 echo "  VARIANTS           = ${selected_variants[*]}"
 echo "  DATA_PATH          = $DATA_PATH"
 echo "  SAVE_DIR           = $SAVE_DIR"
 echo "  CHECKPOINT_DIR     = $CHECKPOINT_DIR"
 echo "  WEIGHT_PREFIX      = $WEIGHT_PREFIX"
+echo "  SEED               = $SEED"
 echo "  RANK               = $RANK"
 echo "  LM_HEAD_BIAS       = $LM_HEAD_BIAS"
 echo "  TRAIN_SPLIT_RATIO  = $TRAIN_SPLIT_RATIO"
@@ -116,6 +118,7 @@ run_variant() {
         --save_weight "$save_weight" \
         --embedding_variant "$variant" \
         --embedding_variant_rank "$RANK" \
+        --seed "$SEED" \
         --lm_head_bias "$LM_HEAD_BIAS" \
         --train_split_ratio "$TRAIN_SPLIT_RATIO" \
         --batch_size "$BATCH_SIZE" \
@@ -145,7 +148,7 @@ done
 
 echo
 echo "================================================================"
-echo "[s1-s11] ALL DONE at $(date '+%F %T')"
+echo "[s1-s12] ALL DONE at $(date '+%F %T')"
 echo "权重产出列表:"
 ls -lh "$ROOT/trainer/$SAVE_DIR"/"${WEIGHT_PREFIX}"_s*_768.pth 2>/dev/null || echo "  (无)"
 echo "================================================================"

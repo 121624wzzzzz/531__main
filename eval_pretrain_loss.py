@@ -20,7 +20,7 @@ from trainer.trainer_utils import get_model_params
 
 warnings.filterwarnings("ignore")
 
-VALID_VARIANTS = [f"s{i}" for i in range(1, 12)]
+VALID_VARIANTS = [f"s{i}" for i in range(1, 13)]
 UNTIED_VARIANTS = {"s2", "s8", "s9", "s10"}
 
 
@@ -134,11 +134,11 @@ def write_results(results, args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Evaluate MiniMind pretrain loss for S1-S10 variants.")
+    parser = argparse.ArgumentParser(description="Evaluate MiniMind pretrain loss for S1-S12 variants.")
     parser.add_argument("--data_path", default="dataset/pretrain_t2t_mini.jsonl", type=str)
     parser.add_argument("--save_dir", default="out", type=str)
     parser.add_argument("--weight_prefix", default="pretrain_v2", type=str)
-    parser.add_argument("--variants", default="s1,s2,s3,s4,s5,s6,s7,s8,s9,s10,s11", type=str)
+    parser.add_argument("--variants", default="s1,s2,s3,s4,s5,s6,s7,s8,s9,s10,s11,s12", type=str)
     parser.add_argument("--embedding_variant_rank", default=32, type=int)
     parser.add_argument("--hidden_size", default=768, type=int)
     parser.add_argument("--num_hidden_layers", default=8, type=int)
@@ -153,8 +153,8 @@ def main():
     parser.add_argument("--lm_head_bias", default=1, type=int, choices=[0, 1])
     parser.add_argument("--dtype", default="bfloat16", choices=["bfloat16", "float16"])
     parser.add_argument("--device", default="cuda:0" if torch.cuda.is_available() else "cpu", type=str)
-    parser.add_argument("--output_csv", default="logs/s1-s11-pretrain-v2/eval_pretrain_loss.csv", type=str)
-    parser.add_argument("--output_json", default="logs/s1-s11-pretrain-v2/eval_pretrain_loss.json", type=str)
+    parser.add_argument("--output_csv", default="logs/s1-s12-pretrain-v2/eval_pretrain_loss.csv", type=str)
+    parser.add_argument("--output_json", default="logs/s1-s12-pretrain-v2/eval_pretrain_loss.json", type=str)
     args = parser.parse_args()
 
     variants = [v.strip().lower() for v in args.variants.split(",") if v.strip()]

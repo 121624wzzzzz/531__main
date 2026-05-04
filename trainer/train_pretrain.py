@@ -21,13 +21,13 @@ warnings.filterwarnings('ignore')
 
 
 UNTIED_VARIANTS = {"s2", "s8", "s9", "s10"}
-VALID_VARIANTS = {f"s{i}" for i in range(1, 12)}
+VALID_VARIANTS = {f"s{i}" for i in range(1, 13)}
 
 
 def normalize_variant_args(args):
     args.embedding_variant = args.embedding_variant.lower()
     if args.embedding_variant not in VALID_VARIANTS:
-        raise ValueError(f"--embedding_variant 必须是 s1-s11，当前为 {args.embedding_variant}")
+        raise ValueError(f"--embedding_variant 必须是 s1-s12，当前为 {args.embedding_variant}")
     if args.embedding_variant_rank <= 0:
         raise ValueError("--embedding_variant_rank 必须为正整数")
     required_tie = 0 if args.embedding_variant in UNTIED_VARIANTS else 1
@@ -128,8 +128,8 @@ if __name__ == "__main__":
     parser.add_argument('--use_moe', default=0, type=int, choices=[0, 1], help="是否使用MoE架构（0=否，1=是）")
     parser.add_argument('--tie_word_embeddings', default=1, type=int, choices=[0, 1], help="是否绑定embed_tokens与lm_head（0=untied，参数+vocab_size*hidden_size）")
     parser.add_argument('--lm_head_bias', default=0, type=int, choices=[0, 1], help="lm_head是否使用vocab维度bias")
-    parser.add_argument('--embedding_variant', default='s1', type=str, choices=sorted(VALID_VARIANTS), help="S1-S10 embedding/head 变体")
-    parser.add_argument('--embedding_variant_rank', default=32, type=int, help="S4/S5/S6/S7/S9/S10 低秩rank")
+    parser.add_argument('--embedding_variant', default='s1', type=str, choices=sorted(VALID_VARIANTS), help="S1-S12 embedding/head 变体")
+    parser.add_argument('--embedding_variant_rank', default=32, type=int, help="S4/S5/S6/S7/S9/S10/S12 低秩rank")
     parser.add_argument("--data_path", type=str, default="../dataset/pretrain_t2t_mini.jsonl", help="预训练数据路径")
     parser.add_argument("--train_split_ratio", default=1.0, type=float, help="使用数据前多少比例训练，1.0表示全量")
     parser.add_argument('--from_weight', default='none', type=str, help="基于哪个权重训练，为none则从头开始")
@@ -138,13 +138,14 @@ if __name__ == "__main__":
     parser.add_argument("--wandb_project", type=str, default="MiniMind-Pretrain", help="wandb项目名")
     parser.add_argument("--use_compile", default=0, type=int, choices=[0, 1], help="是否使用torch.compile加速（0=否，1=是）")
     parser.add_argument("--max_steps", default=0, type=int, help="每个epoch最多训练step数，0表示不限制")
+    parser.add_argument("--seed", default=42, type=int, help="随机种子基值")
     args = parser.parse_args()
     args = normalize_variant_args(args)
 
     # ========== 1. 初始化环境和随机种子 ==========
     local_rank = init_distributed_mode()
     if dist.is_initialized(): args.device = f"cuda:{local_rank}"
-    setup_seed(42 + (dist.get_rank() if dist.is_initialized() else 0))
+    setup_seed(args.seed + (dist.get_rank() if dist.is_initialized() else 0))
     
     # ========== 2. 配置目录、模型参数、检查ckp ==========
     os.makedirs(args.save_dir, exist_ok=True)
@@ -159,7 +160,7 @@ if __name__ == "__main__":
         embedding_variant_rank=args.embedding_variant_rank
     )
     ckp_data = lm_checkpoint(lm_config, weight=args.save_weight, save_dir=args.checkpoint_dir) if args.from_resume==1 else None
-    Logger(f"[variant] embedding_variant={args.embedding_variant}, rank={args.embedding_variant_rank}, tie_word_embeddings={args.tie_word_embeddings}, lm_head_bias={args.lm_head_bias}")
+    Logger(f"[variant] embedding_variant={args.embedding_variant}, rank={args.embedding_variant_rank}, tie_word_embeddings={args.tie_word_embeddings}, lm_head_bias={args.lm_head_bias}, seed={args.seed}")
     
     # ========== 3. 设置混合精度 ==========
     device_type = "cuda" if "cuda" in args.device else "cpu"
@@ -172,7 +173,7 @@ if __name__ == "__main__":
         import swanlab as wandb
         wandb_id = ckp_data.get('wandb_id') if ckp_data else None
         resume = 'must' if wandb_id else None
-        wandb_run_name = f"MiniMind-Pretrain-Epoch-{args.epochs}-BatchSize-{args.batch_size}-LearningRate-{args.learning_rate}"
+        wandb_run_name = f"MiniMind-Pretrain-{args.embedding_variant}-Seed-{args.seed}-Epoch-{args.epochs}-BatchSize-{args.batch_size}-LearningRate-{args.learning_rate}"
         wandb.init(project=args.wandb_project, name=wandb_run_name, id=wandb_id, resume=resume)
     
     # ========== 5. 定义模型、数据、优化器 ==========
@@ -209,7 +210,7 @@ if __name__ == "__main__":
     # ========== 8. 开始训练 ==========
     for epoch in range(start_epoch, args.epochs):
         train_sampler and train_sampler.set_epoch(epoch)
-        setup_seed(42 + epoch); indices = torch.randperm(len(train_ds)).tolist()
+        setup_seed(args.seed + epoch); indices = torch.randperm(len(train_ds)).tolist()
         skip = start_step if (epoch == start_epoch and start_step > 0) else 0
         batch_sampler = SkipBatchSampler(train_sampler or indices, args.batch_size, skip)
         loader = DataLoader(train_ds, batch_sampler=batch_sampler, num_workers=args.num_workers, pin_memory=True)

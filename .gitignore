@@ -7,9 +7,12 @@ docs-minimind/
 
 # Local training artifacts and model weights.
 checkpoints/
+checkpoints_smoke/
 logs/
 wandb/
 runs/
+out_smoke/
+minimind-3/
 *.log
 *.pid
 *.pth
@@ -24,3 +27,4 @@ dataset/*
 !dataset/dataset.md
 !dataset/lm_dataset.py
 !dataset/download_jsonl.py
+!dataset/prepare_fineweb_edu_pretrain.py
