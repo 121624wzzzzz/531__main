@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+
+# legacy raw extraction folder, kept locally only
+simple-examples/
+
+# experiment data and outputs are local-only
+/data/ptb/
+/data/raw/
+/runs/
