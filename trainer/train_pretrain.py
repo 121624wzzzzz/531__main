@@ -1,5 +1,6 @@
 import os
 import sys
+import json
 
 __package__ = "trainer"
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -9,6 +10,7 @@ import time
 import warnings
 import torch
 import torch.distributed as dist
+import torch.nn.functional as F
 from contextlib import nullcontext
 from torch import optim, nn
 from torch.nn.parallel import DistributedDataParallel
@@ -21,13 +23,13 @@ warnings.filterwarnings('ignore')
 
 
 UNTIED_VARIANTS = {"s2", "s8", "s9", "s10"}
-VALID_VARIANTS = {f"s{i}" for i in range(1, 13)}
+VALID_VARIANTS = {f"s{i}" for i in range(1, 14)}
 
 
 def normalize_variant_args(args):
     args.embedding_variant = args.embedding_variant.lower()
     if args.embedding_variant not in VALID_VARIANTS:
-        raise ValueError(f"--embedding_variant 必须是 s1-s12，当前为 {args.embedding_variant}")
+        raise ValueError(f"--embedding_variant 必须是 s1-s13，当前为 {args.embedding_variant}")
     if args.embedding_variant_rank <= 0:
         raise ValueError("--embedding_variant_rank 必须为正整数")
     required_tie = 0 if args.embedding_variant in UNTIED_VARIANTS else 1
@@ -56,10 +58,19 @@ def train_epoch(epoch, loader, iters, start_step=0, wandb=None):
             loss = res.loss + res.aux_loss
             loss = loss / args.accumulation_steps
 
+        probe_grad = (
+            args.grad_log_interval > 0
+            and step % args.grad_log_interval == 0
+            and step % args.accumulation_steps == 0
+        )
+        if probe_grad:
+            res.logits.retain_grad()
         scaler.scale(loss).backward()
 
         if step % args.accumulation_steps == 0:
             scaler.unscale_(optimizer)
+            if probe_grad:
+                log_embedding_grad_stats(epoch, step, res, labels)
             torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
 
             scaler.step(optimizer)
@@ -107,10 +118,122 @@ def train_epoch(epoch, loader, iters, start_step=0, wandb=None):
         optimizer.zero_grad(set_to_none=True)
 
 
+def _raw_model():
+    raw_model = model.module if isinstance(model, DistributedDataParallel) else model
+    return getattr(raw_model, '_orig_mod', raw_model)
+
+
+def _grad_stats(tensor):
+    if tensor is None:
+        return {"norm": None, "rms": None}
+    tensor = tensor.detach().float()
+    return {
+        "norm": float(torch.linalg.vector_norm(tensor).item()),
+        "rms": float(torch.sqrt(torch.mean(tensor * tensor)).item()),
+    }
+
+
+def _all_reduce_mean(tensor):
+    if dist.is_initialized():
+        dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
+        tensor /= dist.get_world_size()
+    return tensor
+
+
+def _save_grad_tensor(tensor):
+    if tensor is None:
+        return None
+    return tensor.detach().to(dtype=torch.float16, device="cpu")
+
+
+def _untie_module_grads(raw):
+    grads = {}
+    for name, param in raw.named_parameters():
+        if any(key in name for key in ("embedding_beta", "embedding_lora", "embedding_mul", "output_lora", "output_mul", "output_beta")):
+            grads[name] = param.grad
+    return grads
+
+
+def log_embedding_grad_stats(epoch, step, res, labels):
+    raw = _raw_model()
+    embed_weight = raw.model.embed_tokens.weight
+    unemb_weight = raw.lm_head.weight
+    embed_grad = embed_weight.grad
+    unemb_grad = unemb_weight.grad
+    is_tied = bool(args.tie_word_embeddings)
+    untie_grads = _untie_module_grads(raw)
+    row = {
+        "epoch": epoch + 1,
+        "step": step,
+        "variant": args.embedding_variant,
+        "seed": args.seed,
+        "tie_word_embeddings": is_tied,
+        "embed_weight_norm": float(torch.linalg.vector_norm(embed_weight.detach().float()).item()),
+        "unemb_weight_norm": float(torch.linalg.vector_norm(unemb_weight.detach().float()).item()),
+        "untie_module_grads": {name: _grad_stats(grad) for name, grad in untie_grads.items()},
+    }
+    tensor_payload = None
+
+    if is_tied and res.logits.grad is not None:
+        logits_grad = res.logits.grad[..., :-1, :].detach().float()
+        hidden = res.hidden_states[:, :-1, :].detach().float()
+        direct_grad = torch.matmul(
+            logits_grad.reshape(-1, logits_grad.size(-1)).t(),
+            hidden.reshape(-1, hidden.size(-1)),
+        )
+        direct_grad = _all_reduce_mean(direct_grad)
+        total_grad = embed_grad.detach().float()
+        input_path_grad = total_grad - direct_grad
+        row["embed_grad"] = _grad_stats(input_path_grad)
+        row["unemb_grad"] = _grad_stats(direct_grad)
+        row["shared_total_grad"] = _grad_stats(total_grad)
+        row["tied_split"] = {
+            "embed_unemb_grad_cosine": float(F.cosine_similarity(
+                input_path_grad.flatten(),
+                direct_grad.flatten(),
+                dim=0,
+                eps=1e-12,
+            ).item()),
+        }
+        if args.grad_save_tensors == 1 and is_main_process():
+            tensor_payload = {
+                "metadata": {k: row[k] for k in ("epoch", "step", "variant", "seed", "tie_word_embeddings")},
+                "embed_grad": _save_grad_tensor(input_path_grad),
+                "unemb_grad": _save_grad_tensor(direct_grad),
+                "shared_total_grad": _save_grad_tensor(total_grad),
+                "untie_module_grads": {name: _save_grad_tensor(grad) for name, grad in untie_grads.items()},
+            }
+        del direct_grad, input_path_grad
+    else:
+        row["embed_grad"] = _grad_stats(embed_grad)
+        row["unemb_grad"] = _grad_stats(unemb_grad)
+        if args.grad_save_tensors == 1 and is_main_process():
+            tensor_payload = {
+                "metadata": {k: row[k] for k in ("epoch", "step", "variant", "seed", "tie_word_embeddings")},
+                "embed_grad": _save_grad_tensor(embed_grad),
+                "unemb_grad": _save_grad_tensor(unemb_grad),
+                "untie_module_grads": {name: _save_grad_tensor(grad) for name, grad in untie_grads.items()},
+            }
+
+    if is_main_process():
+        os.makedirs(os.path.dirname(args.grad_log_path) or ".", exist_ok=True)
+        with open(args.grad_log_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        if tensor_payload is not None:
+            os.makedirs(args.grad_tensor_dir, exist_ok=True)
+            tensor_path = os.path.join(
+                args.grad_tensor_dir,
+                f"{args.embedding_variant}_epoch{epoch + 1}_step{step}.pt",
+            )
+            torch.save(tensor_payload, tensor_path)
+            Logger(f"[grad] wrote gradient tensor snapshot: {tensor_path}")
+        Logger(f"[grad] wrote embedding grad stats: {args.grad_log_path}")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="MiniMind Pretraining")
-    parser.add_argument("--save_dir", type=str, default="../out", help="模型保存目录")
-    parser.add_argument("--checkpoint_dir", type=str, default="../checkpoints", help="续训快照保存目录")
+    parser.add_argument("--save_dir", type=str, default="weights/final", help="模型保存目录")
+    parser.add_argument("--checkpoint_dir", type=str, default="weights/resume", help="续训快照保存目录")
     parser.add_argument('--save_weight', default='pretrain', type=str, help="保存权重的前缀名")
     parser.add_argument("--epochs", type=int, default=2, help="训练轮数")
     parser.add_argument("--batch_size", type=int, default=32, help="batch size")
@@ -128,9 +251,9 @@ if __name__ == "__main__":
     parser.add_argument('--use_moe', default=0, type=int, choices=[0, 1], help="是否使用MoE架构（0=否，1=是）")
     parser.add_argument('--tie_word_embeddings', default=1, type=int, choices=[0, 1], help="是否绑定embed_tokens与lm_head（0=untied，参数+vocab_size*hidden_size）")
     parser.add_argument('--lm_head_bias', default=0, type=int, choices=[0, 1], help="lm_head是否使用vocab维度bias")
-    parser.add_argument('--embedding_variant', default='s1', type=str, choices=sorted(VALID_VARIANTS), help="S1-S12 embedding/head 变体")
-    parser.add_argument('--embedding_variant_rank', default=32, type=int, help="S4/S5/S6/S7/S9/S10/S12 低秩rank")
-    parser.add_argument("--data_path", type=str, default="../dataset/pretrain_t2t_mini.jsonl", help="预训练数据路径")
+    parser.add_argument('--embedding_variant', default='s1', type=str, choices=sorted(VALID_VARIANTS), help="S1-S13 embedding/head 变体")
+    parser.add_argument('--embedding_variant_rank', default=32, type=int, help="S4/S5/S6/S7/S9/S10/S12/S13 低秩rank")
+    parser.add_argument("--data_path", type=str, default="../dataset/minimind/pretrain_t2t_mini.jsonl", help="预训练数据路径")
     parser.add_argument("--train_split_ratio", default=1.0, type=float, help="使用数据前多少比例训练，1.0表示全量")
     parser.add_argument('--from_weight', default='none', type=str, help="基于哪个权重训练，为none则从头开始")
     parser.add_argument('--from_resume', default=0, type=int, choices=[0, 1], help="是否自动检测&续训（0=否，1=是）")
@@ -139,6 +262,11 @@ if __name__ == "__main__":
     parser.add_argument("--use_compile", default=0, type=int, choices=[0, 1], help="是否使用torch.compile加速（0=否，1=是）")
     parser.add_argument("--max_steps", default=0, type=int, help="每个epoch最多训练step数，0表示不限制")
     parser.add_argument("--seed", default=42, type=int, help="随机种子基值")
+    parser.add_argument("--tokenizer_path", default="../model", type=str, help="Tokenizer路径或Hugging Face名称")
+    parser.add_argument("--grad_log_interval", default=0, type=int, help="每隔多少个optimizer step记录embedding/unembedding梯度，0表示关闭")
+    parser.add_argument("--grad_log_path", default="../logs/grad_stats.jsonl", type=str, help="梯度统计JSONL输出路径")
+    parser.add_argument("--grad_save_tensors", default=0, type=int, choices=[0, 1], help="是否保存梯度tensor快照")
+    parser.add_argument("--grad_tensor_dir", default="../logs/grad_tensors", type=str, help="梯度tensor快照输出目录")
     args = parser.parse_args()
     args = normalize_variant_args(args)
 
@@ -177,7 +305,7 @@ if __name__ == "__main__":
         wandb.init(project=args.wandb_project, name=wandb_run_name, id=wandb_id, resume=resume)
     
     # ========== 5. 定义模型、数据、优化器 ==========
-    model, tokenizer = init_model(lm_config, args.from_weight, device=args.device)
+    model, tokenizer = init_model(lm_config, args.from_weight, tokenizer_path=args.tokenizer_path, device=args.device)
     train_end_index = None
     if args.train_split_ratio < 1.0:
         if not 0 < args.train_split_ratio < 1:
