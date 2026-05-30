@@ -1,4 +1,4 @@
-"""LSTM language models for the PTB experiments.
+"""Language models for the PTB experiments.
 
 Two architectures are exposed via :func:`build_model`:
 
@@ -6,6 +6,9 @@ Two architectures are exposed via :func:`build_model`:
   paper's ``small`` / ``large`` rows and the local 4090 screening rows.
 - :class:`VariationalDropoutLSTMModel`: Gal / Bayesian-dropout variant used
   to reproduce the BayesianRNN rows.
+- :class:`VariationalDropoutRHNModel`: Zilly / Press & Wolf RHN + BD rows.
+- :class:`TinyTransformerLM`: decoder-only Transformer probe for tied-head
+  relaxation experiments.
 
 Both share the :class:`~variants.EmbeddingVariant` for input/output
 embedding relaxation and accept the same ``(variant, rank, relaxation_scale)``
@@ -20,7 +23,12 @@ import torch
 from torch import nn
 
 from configs import PTBConfig
+from nn_utils import inverted_bernoulli, word_input_mask
+from rhn import VariationalDropoutRHNModel
 from variants import VARIANT_CHOICES, EmbeddingVariant, HiddenState
+
+# Sentinel for architectures with no recurrent state.
+_DUMMY_HIDDEN: HiddenState = (torch.empty(0), torch.empty(0))
 
 
 class StandardLSTMModel(nn.Module):
@@ -50,9 +58,10 @@ class StandardLSTMModel(nn.Module):
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
-        for param in self.parameters():
-            nn.init.uniform_(param, -self.config.init_scale, self.config.init_scale)
         self.embeddings.reset_parameters()
+        for name, param in self.named_parameters():
+            if not name.startswith("embeddings."):
+                nn.init.uniform_(param, -self.config.init_scale, self.config.init_scale)
 
     def forward(self, input_ids: torch.Tensor, hidden: Optional[HiddenState]) -> Tuple[torch.Tensor, HiddenState]:
         emb = self.drop(self.embeddings.input_embeddings(input_ids))
@@ -127,25 +136,10 @@ class VariationalDropoutLSTMModel(nn.Module):
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
-        for param in self.parameters():
-            nn.init.uniform_(param, -self.config.init_scale, self.config.init_scale)
         self.embeddings.reset_parameters()
-
-    def inverted_bernoulli(self, shape: Tuple[int, ...], dropout: float, device: torch.device) -> torch.Tensor:
-        if not self.training or dropout <= 0.0:
-            return torch.ones(shape, device=device)
-        keep = 1.0 - dropout
-        return torch.empty(shape, device=device).bernoulli_(keep).div_(keep)
-
-    def word_input_mask(self, input_ids: torch.Tensor) -> torch.Tensor:
-        batch_size, num_steps = input_ids.shape
-        device = input_ids.device
-        dropout = self.config.dropout_x
-        if not self.training or dropout <= 0.0:
-            return torch.ones(batch_size, num_steps, 1, device=device)
-
-        keep = 1.0 - dropout
-        return torch.empty(batch_size, num_steps, 1, device=device).bernoulli_(keep).div_(keep)
+        for name, param in self.named_parameters():
+            if not name.startswith("embeddings."):
+                nn.init.uniform_(param, -self.config.init_scale, self.config.init_scale)
 
     def forward(self, input_ids: torch.Tensor, hidden: Optional[HiddenState]) -> Tuple[torch.Tensor, HiddenState]:
         batch_size, num_steps = input_ids.shape
@@ -156,15 +150,15 @@ class VariationalDropoutLSTMModel(nn.Module):
         h_layers = list(torch.unbind(hidden[0], dim=0))
         c_layers = list(torch.unbind(hidden[1], dim=0))
         gate_input_masks = [
-            self.inverted_bernoulli((batch_size, 4, self.config.hidden_size), self.config.dropout_i, device)
+            inverted_bernoulli((batch_size, 4, self.config.hidden_size), self.config.dropout_i, self.training, device)
             for _ in range(self.config.num_layers)
         ]
         gate_hidden_masks = [
-            self.inverted_bernoulli((batch_size, 4, self.config.hidden_size), self.config.dropout_h, device)
+            inverted_bernoulli((batch_size, 4, self.config.hidden_size), self.config.dropout_h, self.training, device)
             for _ in range(self.config.num_layers)
         ]
-        output_mask = self.inverted_bernoulli((batch_size, self.config.hidden_size), self.config.dropout_o, device)
-        input_mask = self.word_input_mask(input_ids)
+        output_mask = inverted_bernoulli((batch_size, self.config.hidden_size), self.config.dropout_o, self.training, device)
+        input_mask = word_input_mask(input_ids, self.config.dropout_x, self.training)
         embeddings = self.embeddings.input_embeddings(input_ids)
         outputs: List[torch.Tensor] = []
 
@@ -195,6 +189,62 @@ class VariationalDropoutLSTMModel(nn.Module):
         return weight.new_zeros(shape, device=device), weight.new_zeros(shape, device=device)
 
 
+class TinyTransformerLM(nn.Module):
+    """Small causal Transformer LM sharing the embedding-variant interface."""
+
+    def __init__(self, config: PTBConfig, variant: str, rank: int, relaxation_scale: float):
+        super().__init__()
+        self.config = config
+        self.variant = variant
+        hidden = config.hidden_size
+        self.embeddings = EmbeddingVariant(
+            config.vocab_size,
+            hidden,
+            variant,
+            rank,
+            config.init_scale,
+            relaxation_scale,
+        )
+        self.pos_embeddings = nn.Parameter(torch.empty(config.num_steps, hidden))
+        dropout = 1.0 - config.keep_prob
+        nhead = 8 if hidden % 8 == 0 else 4  # fallback for non-standard hidden sizes
+        layer = nn.TransformerEncoderLayer(
+            d_model=hidden,
+            nhead=nhead,
+            dim_feedforward=4 * hidden,
+            dropout=dropout,
+            activation="gelu",
+            batch_first=True,
+            norm_first=True,
+        )
+        self.transformer = nn.TransformerEncoder(layer, num_layers=config.num_layers)
+        self.drop = nn.Dropout(dropout)
+        self.proj = nn.Linear(hidden, hidden) if variant in {"pr", "wt_pr"} else None
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        nn.init.uniform_(self.pos_embeddings, -self.config.init_scale, self.config.init_scale)
+        self.embeddings.reset_parameters()
+
+    def forward(self, input_ids: torch.Tensor, hidden: Optional[HiddenState]) -> Tuple[torch.Tensor, HiddenState]:
+        batch_size, num_steps = input_ids.shape
+        emb = self.embeddings.input_embeddings(input_ids)
+        emb = emb + self.pos_embeddings[:num_steps].unsqueeze(0)
+        emb = self.drop(emb)
+        mask = torch.triu(
+            torch.ones(num_steps, num_steps, device=input_ids.device, dtype=torch.bool),
+            diagonal=1,
+        )
+        output = self.transformer(emb, mask=mask)
+        output = self.drop(output)
+        if self.proj is not None:
+            output = self.proj(output)
+        return self.embeddings.output_logits(output), _DUMMY_HIDDEN
+
+    def init_hidden(self, batch_size: int, device: torch.device) -> HiddenState:
+        return _DUMMY_HIDDEN
+
+
 def build_model(
     config: PTBConfig,
     variant: str,
@@ -208,4 +258,8 @@ def build_model(
         return StandardLSTMModel(config, variant, rank, relaxation_scale)
     if architecture == "variational":
         return VariationalDropoutLSTMModel(config, variant, rank, relaxation_scale)
+    if architecture == "rhn":
+        return VariationalDropoutRHNModel(config, variant, rank, relaxation_scale)
+    if architecture == "transformer":
+        return TinyTransformerLM(config, variant, rank, relaxation_scale)
     raise ValueError(f"Unknown architecture: {architecture}")

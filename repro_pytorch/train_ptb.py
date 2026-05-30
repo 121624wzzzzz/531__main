@@ -5,7 +5,7 @@ Configuration tables, embedding variants, model architectures, and the
 training loop live in dedicated sibling modules:
 
 - :mod:`configs`     -- ``PTBConfig`` and the named ``CONFIGS`` registry.
-- :mod:`variants`    -- S1-S13 metadata and the ``EmbeddingVariant`` module.
+- :mod:`variants`    -- S1-S21 metadata and the ``EmbeddingVariant`` module.
 - :mod:`model`       -- standard / variational LSTM models and ``build_model``.
 - :mod:`train_loop`  -- ``run_epoch``, helpers, and checkpoint persistence.
 """
@@ -18,7 +18,6 @@ import sys
 import time
 from dataclasses import asdict, replace
 from pathlib import Path
-from typing import Dict, List
 
 import torch
 from torch import nn
@@ -27,9 +26,11 @@ from configs import CONFIGS
 from model import build_model
 from ptb_data import PTBBatchedSplit, ptb_raw_data
 from train_loop import (
+    TrainingConfig,
+    build_optimizer_and_scheduler,
     maybe_save_checkpoint,
     resolve_device,
-    run_epoch,
+    run_training,
     set_seed,
 )
 from variants import VARIANT_CHOICES, actual_extra_params, variant_formula
@@ -45,9 +46,9 @@ def parse_args() -> argparse.Namespace:
         "--relaxation_scale",
         type=float,
         default=1.0,
-        help="Multiplier applied to every non-base S1-S13 relaxation term",
+        help="Multiplier applied to every non-base S1-S21 relaxation term",
     )
-    parser.add_argument("--architecture", default=None, choices=["zaremba", "variational"])
+    parser.add_argument("--architecture", default=None, choices=["zaremba", "variational", "rhn", "transformer"])
     parser.add_argument("--legacy_weight_decay", type=float, default=None)
     parser.add_argument("--device", default="auto", help="auto, cpu, cuda, or cuda:N")
     parser.add_argument("--seed", type=int, default=1)
@@ -92,6 +93,23 @@ def parse_args() -> argparse.Namespace:
             "modern-fast enables TF32 and cuDNN benchmark."
         ),
     )
+    parser.add_argument("--optimizer", default=None, choices=["sgd", "adamw"])
+    parser.add_argument("--learning_rate", type=float, default=None)
+    parser.add_argument("--decay_start_epoch", type=int, default=None)
+    parser.add_argument("--lr_decay_override", type=float, default=None)
+    parser.add_argument("--weight_decay", type=float, default=0.0)
+    parser.add_argument("--adam_beta2", type=float, default=0.95)
+    parser.add_argument("--lr_schedule", default=None, choices=["epoch_decay", "warmup_cosine"])
+    parser.add_argument("--warmup_steps", type=int, default=None)
+    parser.add_argument("--warmup_fraction", type=float, default=0.05)
+    parser.add_argument("--min_lr_ratio", type=float, default=0.1)
+    parser.add_argument("--early_stopping_patience", type=int, default=None)
+    parser.add_argument("--early_stopping_min_delta", type=float, default=0.0)
+    parser.add_argument(
+        "--no_restore_best",
+        action="store_true",
+        help="Do not restore the best-validation checkpoint before final test",
+    )
     parser.add_argument("--output_dir", type=Path, default=None, help="Optional checkpoint/metric output directory")
     parser.add_argument("--quiet", action="store_true")
     return parser.parse_args()
@@ -126,6 +144,60 @@ def _maybe_compile(model: nn.Module, args: argparse.Namespace) -> nn.Module:
     return torch.compile(model, mode=args.compile_mode)  # type: ignore[arg-type]
 
 
+def _build_run_metadata(
+    args, config, architecture, device, train_data, valid_data, test_data,
+    vocab_size, train_cache, valid_cache, test_cache,
+    optimizer_name, schedule_name, legacy_weight_decay,
+) -> dict:
+    """Assemble the JSON metadata block printed at the start of every run."""
+    return {
+        "python": sys.version.split()[0],
+        "torch": torch.__version__,
+        "cuda_available": torch.cuda.is_available(),
+        "device": str(device),
+        "model": args.model,
+        "architecture": architecture,
+        "variant": args.variant,
+        "variant_info": {
+            **variant_formula(args.variant),
+            "lora_rank": args.lora_rank,
+            "relaxation_scale": args.relaxation_scale,
+            "actual_extra_params": actual_extra_params(
+                args.variant, config.vocab_size, config.hidden_size, args.lora_rank,
+            ),
+        },
+        "legacy_weight_decay": legacy_weight_decay,
+        "paper_test_eval": args.paper_test_eval,
+        "tf32": args.tf32,
+        "cudnn_benchmark": args.cudnn_benchmark,
+        "compile": args.compile,
+        "compile_mode": args.compile_mode if args.compile else None,
+        "speed_mode": args.speed_mode,
+        "optimizer": optimizer_name,
+        "lr_schedule": schedule_name,
+        "weight_decay": args.weight_decay if optimizer_name == "adamw" else 0.0,
+        "adam_beta2": args.adam_beta2 if optimizer_name == "adamw" else None,
+        "warmup_fraction": args.warmup_fraction if schedule_name == "warmup_cosine" else None,
+        "warmup_steps": args.warmup_steps if schedule_name == "warmup_cosine" else None,
+        "min_lr_ratio": args.min_lr_ratio if schedule_name == "warmup_cosine" else None,
+        "early_stopping_patience": args.early_stopping_patience,
+        "early_stopping_min_delta": args.early_stopping_min_delta,
+        "restore_best": not args.no_restore_best,
+        "config": asdict(config),
+        "dataset_tokens": {
+            "train": len(train_data),
+            "valid": len(valid_data),
+            "test": len(test_data),
+            "vocab": vocab_size,
+        },
+        "epoch_size": {
+            "train_batches": len(train_cache),
+            "valid_batches": len(valid_cache),
+            "test_batches": len(test_cache),
+        },
+    }
+
+
 def main() -> int:
     args = parse_args()
     _apply_speed_mode(args)
@@ -151,152 +223,81 @@ def main() -> int:
         architecture=architecture,
         vocab_size=vocab_size,
         legacy_weight_decay=legacy_weight_decay,
+        learning_rate=args.learning_rate if args.learning_rate is not None else base_config.learning_rate,
+        max_epoch=args.decay_start_epoch if args.decay_start_epoch is not None else base_config.max_epoch,
+        lr_decay=args.lr_decay_override if args.lr_decay_override is not None else base_config.lr_decay,
     )
     test_config = replace(config, batch_size=1, num_steps=1) if args.paper_test_eval else config
 
     max_epochs = args.max_epochs if args.max_epochs is not None else config.max_max_epoch
     model = build_model(config, args.variant, architecture, args.lora_rank, args.relaxation_scale).to(device)
     model = _maybe_compile(model, args)
-    optimizer = torch.optim.SGD(model.parameters(), lr=config.learning_rate)
 
     train_cache = PTBBatchedSplit(train_data, config.batch_size, config.num_steps, device)
     valid_cache = PTBBatchedSplit(valid_data, config.batch_size, config.num_steps, device)
     test_cache = PTBBatchedSplit(test_data, test_config.batch_size, test_config.num_steps, device)
-
-    print(
-        json.dumps(
-            {
-                "python": sys.version.split()[0],
-                "torch": torch.__version__,
-                "cuda_available": torch.cuda.is_available(),
-                "device": str(device),
-                "model": args.model,
-                "architecture": architecture,
-                "variant": args.variant,
-                "variant_info": {
-                    **variant_formula(args.variant),
-                    "lora_rank": args.lora_rank,
-                    "relaxation_scale": args.relaxation_scale,
-                    "actual_extra_params": actual_extra_params(
-                        args.variant,
-                        config.vocab_size,
-                        config.hidden_size,
-                        args.lora_rank,
-                    ),
-                },
-                "legacy_weight_decay": legacy_weight_decay,
-                "paper_test_eval": args.paper_test_eval,
-                "tf32": args.tf32,
-                "cudnn_benchmark": args.cudnn_benchmark,
-                "compile": args.compile,
-                "compile_mode": args.compile_mode if args.compile else None,
-                "speed_mode": args.speed_mode,
-                "config": asdict(config),
-                "dataset_tokens": {
-                    "train": len(train_data),
-                    "valid": len(valid_data),
-                    "test": len(test_data),
-                    "vocab": vocab_size,
-                },
-                "epoch_size": {
-                    "train_batches": len(train_cache),
-                    "valid_batches": len(valid_cache),
-                    "test_batches": len(test_cache),
-                },
-            },
-            indent=2,
-        ),
-        flush=True,
+    optimizer_name = args.optimizer or ("adamw" if architecture == "transformer" else "sgd")
+    schedule_name = args.lr_schedule or ("warmup_cosine" if optimizer_name == "adamw" else "epoch_decay")
+    optimizer, scheduler, _opt_name, _sched_name = build_optimizer_and_scheduler(
+        model, config,
+        optimizer_name=optimizer_name,
+        schedule_name=schedule_name,
+        weight_decay=args.weight_decay,
+        adam_beta2=args.adam_beta2,
+        train_batches=len(train_cache) if args.max_train_batches is None else min(len(train_cache), args.max_train_batches),
+        max_epochs=max_epochs,
+        warmup_steps=args.warmup_steps,
+        warmup_fraction=args.warmup_fraction,
+        min_lr_ratio=args.min_lr_ratio,
     )
 
-    metrics: Dict[str, float] = {}
-    train_total_sec = 0.0
-    eval_total_sec = 0.0
-    epoch_throughput: List[float] = []
+    metadata = _build_run_metadata(
+        args, config, architecture, device, train_data, valid_data, test_data,
+        vocab_size, train_cache, valid_cache, test_cache,
+        optimizer_name, schedule_name, legacy_weight_decay,
+    )
+    print(json.dumps(metadata, indent=2), flush=True)
+
     overall_start = time.perf_counter()
-
-    for epoch in range(max_epochs):
-        lr_decay = config.lr_decay ** max(epoch - config.max_epoch, 0.0)
-        lr = config.learning_rate * lr_decay
-        for group in optimizer.param_groups:
-            group["lr"] = lr
-
-        print(f"Epoch {epoch + 1}/{max_epochs} lr={lr:.5f}", flush=True)
-        train_stats = run_epoch(
-            model,
-            train_data,
-            config,
-            device,
-            optimizer,
-            args.max_train_batches,
-            verbose=not args.quiet,
-            legacy_weight_decay=legacy_weight_decay,
-            batch_cache=train_cache,
-            log_every=args.log_every,
-        )
-        valid_stats = run_epoch(
-            model,
-            valid_data,
-            config,
-            device,
-            optimizer=None,
-            max_batches=args.max_eval_batches,
-            verbose=False,
-            legacy_weight_decay=0.0,
-            batch_cache=valid_cache,
-            log_every=args.log_every,
-        )
-        train_total_sec += train_stats.elapsed_sec
-        eval_total_sec += valid_stats.elapsed_sec
-        epoch_throughput.append(train_stats.words_per_sec)
-
-        metrics[f"epoch_{epoch + 1}_train_ppl"] = train_stats.perplexity
-        metrics[f"epoch_{epoch + 1}_valid_ppl"] = valid_stats.perplexity
-        metrics[f"epoch_{epoch + 1}_train_sec"] = train_stats.elapsed_sec
-        metrics[f"epoch_{epoch + 1}_valid_sec"] = valid_stats.elapsed_sec
-        metrics[f"epoch_{epoch + 1}_train_wps"] = train_stats.words_per_sec
-        print(
-            f"Epoch {epoch + 1} train_ppl={train_stats.perplexity:.3f} "
-            f"valid_ppl={valid_stats.perplexity:.3f} "
-            f"train_sec={train_stats.elapsed_sec:.1f} "
-            f"valid_sec={valid_stats.elapsed_sec:.1f} "
-            f"train_wps={train_stats.words_per_sec:.0f}",
-            flush=True,
-        )
-
-    test_stats = run_epoch(
-        model,
-        test_data,
-        test_config,
-        device,
-        optimizer=None,
-        max_batches=args.max_eval_batches,
-        verbose=False,
-        legacy_weight_decay=0.0,
-        batch_cache=test_cache,
+    tc = TrainingConfig(
+        max_epochs=max_epochs,
+        max_train_batches=args.max_train_batches,
+        max_eval_batches=args.max_eval_batches,
+        legacy_weight_decay=legacy_weight_decay,
+        quiet=args.quiet,
         log_every=args.log_every,
+        early_stopping_patience=args.early_stopping_patience,
+        early_stopping_min_delta=args.early_stopping_min_delta,
+        no_restore_best=args.no_restore_best,
     )
-    eval_total_sec += test_stats.elapsed_sec
-
+    result = run_training(
+        model=model,
+        config=config,
+        test_config=test_config,
+        train_data=train_data,
+        valid_data=valid_data,
+        test_data=test_data,
+        device=device,
+        optimizer=optimizer,
+        train_cache=train_cache,
+        valid_cache=valid_cache,
+        test_cache=test_cache,
+        schedule_name=schedule_name,
+        tc=tc,
+        scheduler=scheduler,
+    )
+    metrics = result.metrics
     overall_elapsed = max(time.perf_counter() - overall_start, 1e-9)
-    avg_train_wps = (
-        sum(epoch_throughput) / len(epoch_throughput) if epoch_throughput else 0.0
-    )
-
-    metrics["test_ppl"] = test_stats.perplexity
-    metrics["test_sec"] = test_stats.elapsed_sec
     metrics["timing_total_sec"] = overall_elapsed
-    metrics["timing_train_sec"] = train_total_sec
-    metrics["timing_eval_sec"] = eval_total_sec
-    metrics["timing_avg_train_wps"] = avg_train_wps
 
     print(
-        f"Test perplexity={test_stats.perplexity:.3f} test_sec={test_stats.elapsed_sec:.1f}",
+        f"Test perplexity={metrics['test_ppl']:.3f} test_sec={metrics['test_sec']:.1f} "
+        f"best_epoch={result.best_epoch} best_valid_ppl={result.best_valid_ppl:.3f}",
         flush=True,
     )
     print(
-        f"Timing total={overall_elapsed:.1f}s train={train_total_sec:.1f}s "
-        f"eval={eval_total_sec:.1f}s avg_train_wps={avg_train_wps:.0f}",
+        f"Timing total={overall_elapsed:.1f}s train={metrics['timing_train_sec']:.1f}s "
+        f"eval={metrics['timing_eval_sec']:.1f}s avg_train_wps={metrics['timing_avg_train_wps']:.0f}",
         flush=True,
     )
     maybe_save_checkpoint(

@@ -22,18 +22,35 @@ def build_vocab(train_path: Path) -> Dict[str, int]:
 
 
 def file_to_word_ids(path: Path, word_to_id: Dict[str, int]) -> List[int]:
-    return [word_to_id[word] for word in _read_words(path)]
+    unk_id = word_to_id.get("<unk>")
+    if unk_id is None:
+        return [word_to_id[word] for word in _read_words(path)]
+    return [word_to_id.get(word, unk_id) for word in _read_words(path)]
 
 
 def ptb_raw_data(data_path: Union[str, Path]) -> Tuple[List[int], List[int], List[int], int]:
     root = Path(data_path)
-    train_path = root / "ptb.train.txt"
-    valid_path = root / "ptb.valid.txt"
-    test_path = root / "ptb.test.txt"
+    candidates = [
+        ("ptb.train.txt", "ptb.valid.txt", "ptb.test.txt"),
+        ("wiki.train.tokens", "wiki.valid.tokens", "wiki.test.tokens"),
+    ]
+    selected = None
+    for train_name, valid_name, test_name in candidates:
+        tp, vp, ep = root / train_name, root / valid_name, root / test_name
+        if tp.exists() and vp.exists() and ep.exists():
+            if selected is not None:
+                print(
+                    f"note: both PTB and WikiText-2 found; using PTB ({selected[0]}/...). "
+                    f"Use a dedicated data_path to select explicitly.",
+                    flush=True,
+                )
+                break
+            selected = (train_name, valid_name, test_name)
+    if selected is None:
+        expected = [", ".join(names) for names in candidates]
+        raise FileNotFoundError("Missing dataset files. Expected one of: " + " | ".join(expected))
 
-    missing = [str(path) for path in (train_path, valid_path, test_path) if not path.exists()]
-    if missing:
-        raise FileNotFoundError("Missing PTB files: " + ", ".join(missing))
+    train_path, valid_path, test_path = (root / n for n in selected)
 
     word_to_id = build_vocab(train_path)
     train = file_to_word_ids(train_path, word_to_id)
