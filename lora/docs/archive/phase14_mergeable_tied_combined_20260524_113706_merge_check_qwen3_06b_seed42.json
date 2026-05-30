@@ -1,0 +1,18 @@
+{
+  "model_path": "/home/wz/projects/mypro/im_exp/models/Qwen3-0.6B-Base",
+  "adapter_dir": "/home/wz/projects/mypro/im_exp/lora/outputs/affine_vocab/phase14_mergeable_tied_combined_20260524_113706/qwen3_06b__seed42__mergeable_tied_combined_inlmh_s1_8",
+  "input_shape": [
+    1,
+    15
+  ],
+  "current_wrapper_vs_merged": {
+    "max_abs": 3.24249267578125e-05,
+    "mean_abs": 2.7410051188780926e-06,
+    "rms": 3.5864306937583024e-06
+  },
+  "transposed_tied_form_vs_merged": {
+    "max_abs": 3.24249267578125e-05,
+    "mean_abs": 2.7410051188780926e-06,
+    "rms": 3.5864306937583024e-06
+  }
+}

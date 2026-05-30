@@ -1,0 +1,9 @@
+{
+  "source": "/home/wz/projects/mypro/im_exp/minimind/dataset/sft_t2t.jsonl",
+  "source_rows": 5109432,
+  "usable_rows": 5104950,
+  "out_dir": "/home/wz/projects/mypro/im_exp/lora/data/minimind_random_100k",
+  "train": 100000,
+  "eval": 2000,
+  "seed": 42
+}

@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# 深度学习环境激活脚本（torch24）
+#
+# 用法（必须 source，而不是直接执行）:
+#     source set            # 在 im_exp 目录下
+#     source ./set
+#     source /home/wz/projects/mypro/im_exp/set   # 任意目录
+#
+# 作用:
+#   - 初始化 conda（若 shell 还没 init）
+#   - 激活 torch24 环境（PyTorch 2.4.1+cu124，A100 8卡可用）
+#   - 设置一些贴心默认（HF 镜像、tokenizers 并行、无缓冲输出）
+#   - 打印 python / torch / GPU 信息便于核对
+#
+# 提示: 默认不锁定 CUDA_VISIBLE_DEVICES，跑任务前自己 export，例如:
+#     export CUDA_VISIBLE_DEVICES=1,2,3
+# ==============================================================================
+
+# 必须以 source 方式调用
+if [[ "${BASH_SOURCE[0]:-${(%):-%x}}" == "${0}" ]]; then
+    echo "[set] 请使用 'source set' / 'source ./set' 而不是直接执行 ./set"
+    exit 1
+fi
+
+# 1) 初始化 conda（如果当前 shell 还没 init）
+__CONDA_SH="/home/wz/anaconda3/etc/profile.d/conda.sh"
+if ! command -v conda >/dev/null 2>&1; then
+    if [[ -f "$__CONDA_SH" ]]; then
+        # shellcheck source=/dev/null
+        source "$__CONDA_SH"
+    else
+        echo "[set] 找不到 conda，请检查 /home/wz/anaconda3 是否存在"
+        return 1 2>/dev/null || exit 1
+    fi
+fi
+
+# 2) 激活 torch24
+__TARGET_ENV="torch24"
+if [[ "${CONDA_DEFAULT_ENV:-}" != "$__TARGET_ENV" ]]; then
+    conda activate "$__TARGET_ENV" || {
+        echo "[set] 激活 $__TARGET_ENV 失败，请先运行: conda env list 确认环境存在"
+        return 1 2>/dev/null || exit 1
+    }
+fi
+
+# 3) CUDA toolkit 路径（环境内自带 nvcc 12.4，deepspeed/flash-attn 编译需要）
+export CUDA_HOME="${CONDA_PREFIX}"
+export CUDA_PATH="${CONDA_PREFIX}"
+export PATH="${CONDA_PREFIX}/bin:${PATH}"
+
+# 4) 贴心默认（用户可在外部覆盖）
+export HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
+export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
+export PYTHONUNBUFFERED=1
+export PIP_INDEX_URL="${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
+
+# 5) 信息打印
+__PY="$(which python)"
+__PYV="$(python -V 2>&1)"
+__TORCH_INFO="$(python - <<'PY' 2>/dev/null
+import torch
+print(f"{torch.__version__}  cuda_runtime={torch.version.cuda}  cuda_avail={torch.cuda.is_available()}  ngpu={torch.cuda.device_count()}")
+PY
+)"
+
+__NVCC_VER="$(nvcc --version 2>/dev/null | sed -n 's/.*release \([0-9.]*\).*/\1/p')"
+
+echo "================ torch24 environment activated ================"
+echo "  conda env  : ${CONDA_DEFAULT_ENV}"
+echo "  python     : ${__PY}"
+echo "  version    : ${__PYV}"
+echo "  torch      : ${__TORCH_INFO}"
+echo "  nvcc       : ${__NVCC_VER:-<not found>}  (\$CUDA_HOME=${CUDA_HOME})"
+echo "  HF_ENDPOINT          = ${HF_ENDPOINT}"
+echo "  PIP_INDEX_URL        = ${PIP_INDEX_URL}"
+echo "  CUDA_VISIBLE_DEVICES = ${CUDA_VISIBLE_DEVICES:-<unset, 默认全部 8 张 A100>}"
+echo "==============================================================="
+
+unset __CONDA_SH __TARGET_ENV __PY __PYV __TORCH_INFO __NVCC_VER

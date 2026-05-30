@@ -1,0 +1,7 @@
+## Concurrent work on efficient vocabulary-boundary parameterization (paste into Related Work)
+
+In concurrent anonymous work (Anonymous, 2026a), the authors address **pretraining-time** weight tying and propose **Asymmetric Geometric Decoupling (AGD)**, which retains a shared output-side vocabulary matrix while granting structured input-side freedom through bias correction and hidden-dimensional low-rank deformation. Using cross-model geometric and spectral diagnostics, they argue that tied matrices are output-dominated and that input-side geometry is the primary casualty of hard tying; in MiniMind and FineWeb-Edu/GPT-2 pretraining, input-side AGD improves over the tied baseline at a small fraction of the parameter cost of full untying.
+
+**Our submission is complementary:** we study **post-training** LoRA placement on frozen models, propose the hidden-space affine adapter A-LoRA, and show that boundary placement should depend on adapter topology and existing hidden-layer capacity rather than symmetric defaults. Both works exploit input/output asymmetry and hidden low-rank structure at the vocabulary boundary, but AGD modifies the forward architecture during pretraining whereas A-LoRA attaches parameter-efficient adapters after pretraining and analyzes mergeable tied variants for deployment.
+
+**Suggested citation:** Anonymous. 2026a. *Efficient Untying of Weight-Tied Language Models via Asymmetric Geometric Decoupling.* Anonymous EMNLP 2026 submission.

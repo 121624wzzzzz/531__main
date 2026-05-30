@@ -1,0 +1,12 @@
+% Paste into Related Work (Section 2) of the AGD paper.
+% Requires bib entry Anonymous2026b in anonymous_bibliography_entries.bib
+
+\paragraph{Concurrent work on vocabulary-boundary adaptation.}
+In concurrent anonymous work, \citet{Anonymous2026b} study \emph{post-training} placement of low-rank adapters at the vocabulary boundary and propose A-LoRA, a hidden-space affine parameterization
+$M_{\mathrm{eff}} \approx M_0 (I + \frac{\alpha}{r} P Q) + \mathbf{1}_V \beta^\top$
+whose trainable cost scales with hidden dimension rather than vocabulary size.
+Their analysis of 30 Base$\rightarrow$Instruct pairs similarly finds that output LM heads and tied shared matrices are better approximated by hidden affine structure than untied input embeddings, and that optimal adapter placement is conditional on existing hidden-layer LoRA capacity.
+Our work is complementary rather than overlapping: we focus on \emph{pretraining-time} relaxation of hard weight tying via Asymmetric Geometric Decoupling (AGD), keeping a shared output-side matrix while adding structured input-side freedom (bias correction and hidden low-rank deformation).
+Where the companion paper asks \emph{where to adapt a frozen model}, we ask \emph{how to untie efficiently while training from scratch or continuing pretraining}.
+The two papers share geometric motivation but differ in stage (pretrain vs.\ fine-tune), method (architectural decoupling vs.\ PEFT placement), and evaluation (pretrain PPL vs.\ SFT loss and mergeability).
+We cite the companion submission to satisfy EMNLP/ARR concurrent-work policy and to prevent thin slicing concerns.
