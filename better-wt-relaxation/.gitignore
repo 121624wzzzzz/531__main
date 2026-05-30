@@ -1,0 +1,6 @@
+__pycache__/
+*.py[cod]
+
+# experiment data and outputs are local-only
+/data/
+/runs/
