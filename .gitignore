@@ -41,6 +41,8 @@ minimind/docs-minimind/
 lora/outputs/
 lora/logs/
 lora/data/ultrachat_100k/
+lora/data/*/train.jsonl
+lora/data/*/eval.jsonl
 lora/models/
 
 # better-wt-relaxation
