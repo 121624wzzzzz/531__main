@@ -1,0 +1,14 @@
+{
+    "python.defaultInterpreterPath": "/home/wz/anaconda3/envs/minimind/bin/python",
+    // 方案：在终端启动时自动执行激活脚本
+    "terminal.integrated.env.linux": {
+        "VSCODE_CONDA_ENV": "minimind",
+        "HF_ENDPOINT": "https://hf-mirror.com",
+        // 2. 配置 pip 清华源 (临时环境变量方式，仅在 VSCode 终端生效)
+        "PIP_INDEX_URL": "https://pypi.tuna.tsinghua.edu.cn/simple",
+        "PROMPT_COMMAND": "source /home/wz/projects/.vscode/activate_env.sh 2>/dev/null; unset PROMPT_COMMAND"
+    },
+    "codingcopilot.enableCompletionLanguage": {},
+    "python-envs.defaultEnvManager": "ms-python.python:conda",
+    "python-envs.defaultPackageManager": "ms-python.python:conda"
+}
