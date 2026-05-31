@@ -45,9 +45,8 @@ lora/data/*/train.jsonl
 lora/data/*/eval.jsonl
 lora/models/
 
-# better-wt-relaxation
-better-wt-relaxation/data/
-better-wt-relaxation/runs/
+# better-wt-relaxation (independent repo, do not track here)
+better-wt-relaxation/
 
 # models (Qwen base weights)
 models/Qwen*/
