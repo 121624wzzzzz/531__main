@@ -16,7 +16,8 @@ __pycache__/
 # minimind (independent repo, do not track here)
 minimind/
 
-lora/  # independent repo, do not track here
+# lora (independent repo, do not track here)
+lora/
 
 # better-wt-relaxation (independent repo, do not track here)
 better-wt-relaxation/
