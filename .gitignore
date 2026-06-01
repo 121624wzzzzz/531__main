@@ -35,3 +35,4 @@ models/emb/
 .claude/
 agent-transcripts/
 bench/
+.codex
