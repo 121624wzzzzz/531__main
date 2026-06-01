@@ -13,29 +13,8 @@ __pycache__/
 # Large data & artifacts (local only, do NOT commit)
 # ========================
 
-# minimind
-minimind/out/
-minimind/out_smoke/
-minimind/checkpoints/
-minimind/checkpoints_smoke/
-minimind/logs/
-minimind/wandb/
-minimind/runs/
-minimind/dataset/
-!minimind/dataset/__init__.py
-!minimind/dataset/dataset.md
-!minimind/dataset/lm_dataset.py
-!minimind/dataset/download_jsonl.py
-!minimind/dataset/prepare_fineweb_edu_pretrain.py
-minimind/*.pth
-minimind/*.pt
-minimind/*.ckpt
-minimind/*.safetensors
-minimind/*.tar.gz
-minimind/*.log
-minimind/*.pid
-minimind/website/
-minimind/docs-minimind/
+# minimind (independent repo, do not track here)
+minimind/
 
 # lora
 lora/outputs/
