@@ -16,13 +16,7 @@ __pycache__/
 # minimind (independent repo, do not track here)
 minimind/
 
-# lora
-lora/outputs/
-lora/logs/
-lora/data/ultrachat_100k/
-lora/data/*/train.jsonl
-lora/data/*/eval.jsonl
-lora/models/
+lora/  # independent repo, do not track here
 
 # better-wt-relaxation (independent repo, do not track here)
 better-wt-relaxation/

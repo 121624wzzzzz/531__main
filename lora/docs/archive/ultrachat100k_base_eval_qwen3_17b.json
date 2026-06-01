@@ -1,8 +1,0 @@
-{
-  "model_path": "/home/wz/projects/mypro/im_exp/models/Qwen3-1.7B-Base",
-  "eval_data": "/home/wz/projects/mypro/im_exp/lora/data/ultrachat_100k/eval.jsonl",
-  "num_eval_samples": 2000,
-  "eval_loss": 1.1357016563415527,
-  "eval_runtime": 64.1715,
-  "eval_samples_per_second": 31.166
-}
