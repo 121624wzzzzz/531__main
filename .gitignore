@@ -24,7 +24,7 @@ better-wt-relaxation/
 
 # models (Qwen base weights)
 models/Qwen*/
-models/afflora_embedding/
+afflora_embedding/
 
 # workspace
 .claude/
