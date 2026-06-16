@@ -22,7 +22,7 @@ lora/
 # better-wt-relaxation (independent repo, do not track here)
 better-wt-relaxation/
 
-# head_subspace_analysis (independent repo, do not track here)
+# head_subspace_analysis (analysis scripts & outputs, local only)
 head_subspace_analysis/
 
 # models (Qwen base weights)
@@ -30,6 +30,7 @@ models/Qwen*/
 afflora_text_embedding/
 
 # workspace
+.agents/
 .claude/
 agent-transcripts/
 bench/
